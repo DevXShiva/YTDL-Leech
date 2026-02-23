@@ -1,13 +1,27 @@
 import os
 import asyncio
 import yt_dlp
+import threading
+from flask import Flask
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 
-# Load environment variables for local testing
+# Load environment variables
 load_dotenv()
+
+# --- Flask Server for Render Health Check ---
+web_app = Flask(__name__)
+
+@web_app.route('/')
+def health_check():
+    return "Bot is running perfectly!", 200
+
+def run_web_server():
+    # Render default port 10000 use karta hai
+    port = int(os.environ.get("PORT", 10000))
+    web_app.run(host='0.0.0.0', port=port)
 
 # --- Environment Variables ---
 API_ID = int(os.getenv("API_ID"))
@@ -26,58 +40,42 @@ DOWNLOAD_EMOJIS = ["▰▱▱▱▱▱▱▱▱▱", "▰▰▱▱▱▱▱▱�
                    "▰▰▰▰▰▰▱▱▱▱", "▰▰▰▰▰▰▰▱▱▱", "▰▰▰▰▰▰▰▰▱▱", "▰▰▰▰▰▰▰▰▰▱", "▰▰▰▰▰▰▰▰▰▰"]
 UPLOAD_EMOJIS = ["■□□□□", "■■□□□", "■■■□□", "■■■■□", "■■■■■"]
 
-# This function will update the progress message
 async def progress_callback(current, total, message: Message, status_type: str, task_id):
+    if total == 0: return
     percent = current * 100 / total
     
-    # Get the current animation frame from MongoDB
     task_data = await collection.find_one({"_id": task_id})
-    if not task_data: # If task is deleted, stop updating
-        return
+    if not task_data: return
 
     frame_index = task_data.get("frame_index", 0)
-    
-    if status_type == "Download":
-        emoji_list = DOWNLOAD_EMOJIS
-        prefix_emoji = "⬇️"
-    else: # Upload
-        emoji_list = UPLOAD_EMOJIS
-        prefix_emoji = "⬆️"
+    emoji_list = DOWNLOAD_EMOJIS if status_type == "Download" else UPLOAD_EMOJIS
+    prefix = "⬇️" if status_type == "Download" else "⬆️"
     
     current_emoji = emoji_list[frame_index % len(emoji_list)]
-    
-    text = f"{prefix_emoji} **{status_type}ing:** {current_emoji} `{percent:.1f}%`"
+    text = f"{prefix} **{status_type}ing:** {current_emoji} `{percent:.1f}%`"
     
     try:
         await message.edit_text(text)
-        # Update frame index in MongoDB for next iteration
-        await collection.update_one({"_id": task_id}, {"$set": {"frame_index": (frame_index + 1) % len(emoji_list)}})
-    except Exception as e:
-        # Avoid flood waits or deleted messages
-        if "MESSAGE_NOT_MODIFIED" not in str(e):
-            print(f"Error updating progress message: {e}")
-        pass # Silently pass if message can't be edited
+        await collection.update_one({"_id": task_id}, {"$set": {"frame_index": (frame_index + 1)}})
+    except:
+        pass
 
 @app.on_message(filters.command("start"))
 async def start_command(client, message: Message):
-    await message.reply_text("Hello! Send me a link to leech. I support m3u8, YouTube, etc.")
+    await message.reply_text("👋 Hello! Send me a link to leech. I'll handle the rest.")
 
 @app.on_message(filters.text & ~filters.command(["start"]))
 async def leech_handler(client, message: Message):
     url = message.text
     status_message = await message.reply_text("🔎 Processing link...")
 
-    # MongoDB entry for tracking and animation
-    task_data = {"user_id": message.from_user.id, "url": url, "status": "pending", "frame_index": 0}
-    task = await collection.insert_one(task_data)
-    task_id = task.inserted_id # MongoDB's ObjectId
+    # DB Entry
+    task = await collection.insert_one({"user_id": message.from_user.id, "frame_index": 0})
+    task_id = task.inserted_id
 
-    # Create a unique download directory for each task
     download_dir = f"downloads/{task_id}/"
-    if not os.path.exists(download_dir):
-        os.makedirs(download_dir)
+    if not os.path.exists(download_dir): os.makedirs(download_dir)
 
-    # yt-dlp Options
     ydl_opts = {
         'format': 'best',
         'outtmpl': f'{download_dir}%(title)s.%(ext)s',
@@ -88,42 +86,31 @@ async def leech_handler(client, message: Message):
         )],
     }
     
-    file_path = None # Initialize file_path
-    
+    file_path = None
     try:
-        # Download
-        await collection.update_one({"_id": task_id}, {"$set": {"status": "downloading"}})
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            await status_message.edit_text("📥 Starting Download...")
             info = ydl.extract_info(url, download=True)
             file_path = ydl.prepare_filename(info)
-            title = info.get('title', 'Video')
             
-        # Upload
-        await collection.update_one({"_id": task_id}, {"$set": {"status": "uploading", "frame_index": 0}}) # Reset frame index for upload animation
-        await status_message.edit_text("⬆️ **Uploading to Telegram:** `0.0%`") # Initial upload message
-        
+        await status_message.edit_text("⬆️ Starting Upload...")
         await message.reply_video(
             video=file_path,
-            caption=f"✅ **Leeched:** `{title}`\n\n**Source:** `{url}`",
+            caption=f"✅ **Leeched Successfully!**\n\n`{info.get('title')}`",
             progress=progress_callback,
             progress_args=(status_message, "Upload", task_id)
         )
-
-        await status_message.delete() # Delete the animated status message
+        await status_message.delete()
 
     except Exception as e:
-        error_message = f"❌ Error: {str(e)}"
-        print(error_message) # Log the error
-        try:
-            await status_message.edit_text(error_message)
-        except:
-            await message.reply_text(error_message) # If status_message already deleted
-
+        await message.reply_text(f"❌ Error: {str(e)}")
     finally:
-        # Cleanup: Delete files and database entry
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
-        if os.path.exists(download_dir):
-            os.rmdir(download_dir)
-        
+        if file_path and os.path.exists(file_path): os.remove(file_path)
+        if os.path.exists(download_dir): os.rmdir(download_dir)
         await collection.delete_one({"_id": task_id})
+
+if __name__ == "__main__":
+    # Web server ko background thread mein chalana zaroori hai
+    threading.Thread(target=run_web_server, daemon=True).start()
+    print("Bot is starting...")
+    app.run()
