@@ -4,3 +4,4 @@ yt-dlp
 motor
 dnspython
 python-dotenv
+flask
