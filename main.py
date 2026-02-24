@@ -12,16 +12,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# --- Flask Server ---
 web_app = Flask(__name__)
 @web_app.route('/')
-def health_check(): return "Bot is Alive!", 200
+def health_check(): return "Leech Bot Pro Active", 200
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     web_app.run(host='0.0.0.0', port=port)
 
-# --- Configs ---
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -34,44 +32,63 @@ db = mongo_client["leech_db"]
 collection = db["tasks"]
 
 LAST_UPDATE_TIME = {}
-ANIMATION = ["▰▱▱▱▱", "▰▰▱▱▱", "▰▰▰▱▱", "▰▰▰▰▱", "▰▰▰▰▰"]
 
-# --- Utility Functions ---
-def generate_thumbnail(video_path, thumb_path):
-    try:
-        # Added -update 1 for single image output
-        subprocess.call(['ffmpeg', '-i', video_path, '-ss', '00:00:05.000', '-vframes', '1', '-update', '1', thumb_path])
-        return thumb_path if os.path.exists(thumb_path) else None
-    except: return None
+# --- Progress Bar Generator ---
+def get_progress_bar(percent):
+    done = int(percent / 5)
+    bar = "█" * done + "░" * (20 - done)
+    return f"[{bar}]"
 
-async def progress_ui(current, total, message, status_type, task_id):
+# --- Human Readable Size ---
+def humanbytes(size):
+    if not size: return "0 B"
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size < 1024: return f"{size:.2f} {unit}"
+        size /= 1024
+
+# --- Professional UI Updater ---
+async def progress_ui(current, total, message, status_type, task_id, speed=None, eta=None):
     now = time.time()
-    # 4 second throttling to avoid FloodWait
     if task_id in LAST_UPDATE_TIME and (now - LAST_UPDATE_TIME[task_id]) < 4:
         return
     LAST_UPDATE_TIME[task_id] = now
+
+    percent = (current * 100 / total) if total > 0 else 0
+    bar = get_progress_bar(percent)
     
-    if not total or total == 0:
-        percent = 0
-    else:
-        percent = current * 100 / total
-    
-    task_data = await collection.find_one({"_id": task_id})
-    idx = task_data.get("idx", 0) if task_data else 0
-    bar = ANIMATION[idx % len(ANIMATION)]
-    
+    # Formatting Message
+    text = (
+        f"🚀 **{status_type}ing...**\n"
+        f" `{bar}`\n"
+        f"**Progress:** `{percent:.2f}%` \n"
+        f"**Total Size:** `{humanbytes(total)}` \n"
+        f"**{status_type}ed:** `{humanbytes(current)}` \n"
+        f"**Speed:** `{speed if speed else 'Calculating...'}` \n"
+        f"**ETA:** `{eta if eta else 'N/A'}`"
+    )
+
     try:
-        await message.edit_text(f"🚀 **{status_type}ing...**\n`{bar}` **{percent:.1f}%**")
-        await collection.update_one({"_id": task_id}, {"$inc": {"idx": 1}})
+        await message.edit_text(text)
     except: pass
 
+# --- yt-dlp Hook to catch Logs Data ---
 def ytdl_hook(d, loop, msg, tid):
     if d['status'] == 'downloading':
         curr = d.get('downloaded_bytes', 0)
         total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
-        asyncio.run_coroutine_threadsafe(progress_ui(curr, total, msg, "Download", tid), loop)
+        speed = d.get('_speed_str', 'N/A')
+        eta = d.get('_eta_str', 'N/A')
+        
+        asyncio.run_coroutine_threadsafe(
+            progress_ui(curr, total, msg, "Download", tid, speed, eta), loop
+        )
 
-# --- Handlers ---
+def generate_thumbnail(video_path, thumb_path):
+    try:
+        subprocess.call(['ffmpeg', '-i', video_path, '-ss', '00:00:05.000', '-vframes', '1', '-update', '1', thumb_path])
+        return thumb_path if os.path.exists(thumb_path) else None
+    except: return None
+
 @app.on_message(filters.command("yt"))
 async def yt_leech(client, message: Message):
     text_parts = message.text.split(None, 1)
@@ -90,7 +107,7 @@ async def yt_leech(client, message: Message):
 
     status = await message.reply_text("⚡ Preparing...")
     loop = asyncio.get_event_loop()
-    task = await collection.insert_one({"idx": 0})
+    task = await collection.insert_one({"status": "processing"})
     tid = task.inserted_id
     d_dir = f"downloads/{tid}/"
     if not os.path.exists(d_dir): os.makedirs(d_dir)
@@ -113,16 +130,16 @@ async def yt_leech(client, message: Message):
                 path = new_path
 
         thumb = generate_thumbnail(path, os.path.join(d_dir, "thumb.jpg"))
-        await status.edit_text("📤 Uploading...")
+        await status.edit_text("📤 **Download Complete. Starting Upload...**")
         
-        # FIX: Added lambda to handle current/total arguments from Pyrogram
-        await message.reply_video(
+        sent = await message.reply_video(
             video=path, 
             thumb=thumb, 
             caption=f"✅ `{os.path.basename(path)}`", 
             progress=lambda current, total: progress_ui(current, total, status, "Upload", tid)
         )
         
+        await sent.copy(DUMP_CHAT_ID, caption=f"👤 {message.from_user.mention}\n🔗 {url}")
         await status.delete()
 
     except Exception as e:
