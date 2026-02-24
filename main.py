@@ -39,18 +39,18 @@ ANIMATION = ["▰▱▱▱▱", "▰▰▱▱▱", "▰▰▰▱▱", "▰▰▰
 # --- Utility Functions ---
 def generate_thumbnail(video_path, thumb_path):
     try:
-        # Added -update 1 and -frames:v 1 for single image capture
+        # Added -update 1 for single image output
         subprocess.call(['ffmpeg', '-i', video_path, '-ss', '00:00:05.000', '-vframes', '1', '-update', '1', thumb_path])
         return thumb_path if os.path.exists(thumb_path) else None
     except: return None
 
 async def progress_ui(current, total, message, status_type, task_id):
     now = time.time()
+    # 4 second throttling to avoid FloodWait
     if task_id in LAST_UPDATE_TIME and (now - LAST_UPDATE_TIME[task_id]) < 4:
         return
     LAST_UPDATE_TIME[task_id] = now
     
-    # Handle cases where total might be None or 0 (Common in m3u8)
     if not total or total == 0:
         percent = 0
     else:
@@ -68,15 +68,10 @@ async def progress_ui(current, total, message, status_type, task_id):
 def ytdl_hook(d, loop, msg, tid):
     if d['status'] == 'downloading':
         curr = d.get('downloaded_bytes', 0)
-        # Check both total_bytes and estimate for m3u8
         total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
         asyncio.run_coroutine_threadsafe(progress_ui(curr, total, msg, "Download", tid), loop)
 
 # --- Handlers ---
-@app.on_message(filters.command("start"))
-async def start(client, message):
-    await message.reply_text("✅ **Bot is Online!**\nUse `/yt Link` or `/yt -n Name Link` to leech.")
-
 @app.on_message(filters.command("yt"))
 async def yt_leech(client, message: Message):
     text_parts = message.text.split(None, 1)
@@ -86,7 +81,6 @@ async def yt_leech(client, message: Message):
     raw_text = text_parts[1]
     custom_name, url = None, raw_text
     
-    # Improved Parsing
     if "-n " in raw_text:
         try:
             cmd_data = raw_text.split("-n ", 1)[1]
@@ -106,8 +100,7 @@ async def yt_leech(client, message: Message):
             'format': 'best', 
             'outtmpl': f'{d_dir}%(title)s.%(ext)s', 
             'progress_hooks': [lambda d: ytdl_hook(d, loop, status, tid)],
-            'quiet': True,
-            'noprogress': False # Ensure hooks are triggered
+            'quiet': True
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -122,20 +115,17 @@ async def yt_leech(client, message: Message):
         thumb = generate_thumbnail(path, os.path.join(d_dir, "thumb.jpg"))
         await status.edit_text("📤 Uploading...")
         
-        # FIX: Corrected progress_args structure
-        sent = await message.reply_video(
+        # FIX: Added lambda to handle current/total arguments from Pyrogram
+        await message.reply_video(
             video=path, 
             thumb=thumb, 
             caption=f"✅ `{os.path.basename(path)}`", 
-            progress=progress_ui, 
-            progress_args=("Upload", tid)
+            progress=lambda current, total: progress_ui(current, total, status, "Upload", tid)
         )
         
-        await sent.copy(DUMP_CHAT_ID, caption=f"👤 {message.from_user.mention}\n🔗 {url}")
         await status.delete()
 
     except Exception as e:
-        # FIX: Handle 'NoneType' write error by catching it or logging
         await status.edit_text(f"❌ Error: `{str(e)}`")
     finally:
         if tid in LAST_UPDATE_TIME: del LAST_UPDATE_TIME[tid]
